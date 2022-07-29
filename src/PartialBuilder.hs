@@ -1,101 +1,96 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PartialTypeSignatures #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS -Wall #-}
+{-# OPTIONS_GHC -Wno-unticked-promoted-constructors #-}
 
-module PartialBuilder where
+-- |
+--
+-- This library is a solution for the problem of partially filled data structure.
+--
+-- For example, consider the following type:
+--
+-- >>> :set -XDeriveGeneric -XTypeApplications -XDataKinds -XTypeFamilies
+-- >>> import Data.Function ((&))
+-- >>> :{
+-- data Example = Example
+--   { field1 :: Int,
+--     field2 :: String
+--   }
+--   deriving (Generic, Show)
+-- :}
+--
+-- You may want to provide a "default" value, with some fields which does not contain a default value. Most people are solving this using:
+--
+-- >>> defExample = Example { field1 = 10, field2 = error "You must set field 2" }
+--
+-- And later, at call site:
+--
+-- >>> defExample { field2 = "And now a value" }
+-- Example {field1 = 10, field2 = "And now a value"}
+--
+-- This approach comes with a few limitations:
+--
+-- - You may forget to fill the missing fields, hence leading to an exception at runtime
+-- - User are not aware that they need to fill the field
+-- - This pattern is not usable with `StrictData`.
+--
+-- There are countless alternatives. For example, you may want to define a function such as:
+--
+-- >>> defaultExampleWithField2 s = Example 10 s
+--
+-- However, this approach does not scale with the number of field, and the naming
+-- is not explicit at all.
+--
+-- This library tries to solve this problem by letting you fill an anonymous record which will only be convertible when all the fields has been correctly filled:
+--
+-- - It is type safe, you cannot go wrong.
+-- - You address the field by their name, hence it's explicit.
+-- - Errors message should be acceptable (once the `TypeError` would have been added where needed)
+--
+--
+-- For example, the previous example can be written such as:
+--
+-- >>> :{
+-- >>> defExample = ((emptyIncompletRep :: IncompleteRep (Rep Example) x)
+--     & fillAField2 (Proxy @"field1") (10 :: Int)
+--     )
+-- :}
+--
+-- >>> (defExample & fillAField2 (Proxy @"field2") "Salut" & finish) :: Example
+-- Example {field1 = 10, field2 = "Salut"}
+module PartialBuilder
+  ( emptyIncompletRep,
+    fillAField2,
+    finish,
+    IncompleteRep,
+    Rep,
+  )
+where
 
-import Data.Kind
+import Data.Data (Proxy (Proxy))
 import GHC.Generics
 import GHC.TypeLits (Symbol)
-import Data.Function ((&))
-import Data.Data (Proxy (Proxy))
 
-data HList (x :: [(Symbol, Type)]) where
-  HNil :: HList '[]
-  HCons :: Proxy tName -> a -> HList as -> HList ('(tName, a) ': as)
-
--- deriving instance Show (HList '[])
--- deriving instance (Show a, Show (HList xs)) => Show (HList ('(tName, a) ': xs))
-
-newtype PartialBuilder (t :: Type) (remainingFields :: [(Symbol, Type)]) (knownFields :: [(Symbol, Type)]) = PartialBuilder (HList knownFields)
-  -- deriving (Show)
-
-type family AllFields t where
-  AllFields t = GAllFields (Rep t)
-
-type family GAllFields t :: [(Symbol, Type)] where
-  GAllFields (D1 _ v) = GAllFields v
-  GAllFields (C1 _ v) = GAllFields v
-  GAllFields (a :*: b) = AppendList (GAllFields a) (GAllFields b)
-  GAllFields (S1 ('MetaSel ('Just fieldName) _ _ _) (Rec0 t)) = '[ '(fieldName, t)]
-
-data Status = Empty | Used
-
-data Node k v where
-  EmptyNode :: Node k Empty
-  UsedNode :: k -> Node k Used
-
-data Tree a b where
-  Tree :: a -> b -> Tree a b
-
-type family AppendList a b where
-  AppendList '[] b = b
-  AppendList (x ': xs) b = AppendList xs (x ': b)
-
-emptyPartialBuilder :: PartialBuilder t (AllFields t) '[]
-emptyPartialBuilder = PartialBuilder HNil
-
-data Example = Example
-  { field1 :: Int,
-    field2 :: String
-  }
-  deriving (Generic, Show)
-
-type family ExtractT (tName :: Symbol) (t :: Type) (remainingFields :: [(Symbol, Type)]) :: [(Symbol, Type)] where
-  ExtractT tName t ('(tName, t) ': xs) = xs
-  ExtractT tName t (x ': xs) = x ': ExtractT tName t xs
-
-fillAField :: forall tName t remainingFields knownFields ti. ti -> PartialBuilder t remainingFields knownFields -> PartialBuilder t (ExtractT tName ti remainingFields) ('(tName, ti) ': knownFields)
-fillAField newValue (PartialBuilder values) = PartialBuilder (HCons (Proxy @tName) newValue values)
-
-
-type Yoto = ExtractT "field1" Int '[ '("field1", Int), '("field2", [Char]), '("field3", String)]
-type Yotu = ExtractT "field2" Int '[ '("field1", Int), '("field2", [Char]), '("field3", String)]
-
-val = emptyPartialBuilder
-        & fillAField @"field1" (10 :: Int)
-        & fillAField @"field2" "Salut"
-
-type family EqualList a b where
-  EqualList '[] '[] = 'True
-  EqualList (x ': xs) ys = EqualList xs (PopItem x ys)
-
-type family PopItem x l where
-  PopItem x (x ': xs) = xs
-  PopItem x (y ': xs) = y ': PopItem x xs
-
--- finish :: (EqualList (AllFields t) allFields ~ 'True, Generic t, RebuildFromFields (Rep t x0)) => PartialBuilder t '[] allFields -> t
--- finish (PartialBuilder fields) = to (fromFields fields)
--- 
--- class RebuildFromFields rep where
---   fromFields :: HList x -> rep
-
+-- | That's a placeholder for a future value, which is not yet known.
+data Incomplete t = Incomplete
+  deriving (Show)
+-- | @'IncompleteRep ('Rep t)@ represents a record where all fields @t'@ are replaced by @'Incomplete t'@
 type family IncompleteRep x where
-  IncompleteRep (D1 x v) = D1 x (IncompleteRep v)
   IncompleteRep (C1 x v) = C1 x (IncompleteRep v)
   IncompleteRep (a :*: b) = IncompleteRep a :*: IncompleteRep b
   IncompleteRep (S1 s (Rec0 t)) = S1 s (Rec0 (Incomplete t))
 
+-- | Build a 'Rep' which contains 'Incomplete' in all field values.
 class EmptyIncompleteRep f where
   emptyIncompletRep :: f x
 
@@ -108,13 +103,11 @@ instance (EmptyIncompleteRep a, EmptyIncompleteRep b) => EmptyIncompleteRep (a :
 instance EmptyIncompleteRep (K1 i (Incomplete c)) where
   emptyIncompletRep = K1 Incomplete
 
-data Incomplete t = Incomplete
-  deriving (Show)
-
+-- | Locate the "path" in a 'Rep' toward a field.
 type family PathToField (fieldName :: Symbol) x where
   PathToField fieldName (D1 x z) = PathToField fieldName z
   PathToField fieldName (C1 x z) = PathToField fieldName z
-  PathToField fieldName (S1 ('MetaSel ('Just fieldName) _ _ _)  t) = Just '[]
+  PathToField fieldName (S1 ('MetaSel ('Just fieldName) _ _ _) t) = Just '[]
   PathToField fieldName (a :*: b) = PathThatMatch (PathToField fieldName a) (PathToField fieldName b)
   PathToField fieldName t = Nothing
 
@@ -124,12 +117,10 @@ type family PathThatMatch (a :: Maybe [Direction]) (b :: Maybe [Direction]) :: M
 
 data Direction = LL | RR
 
-type Tru = PathToField "field1" (Rep Example)
-type Tru2 = PathToField "field2" (Rep Example)
-
 type family FromJust x where
   FromJust (Just x) = x
 
+-- | Replace an 'Incomplete' for a specific 'path' with the correct value.
 class SetIncomplete path v f f' | path v f -> f' where
   setIncomplete :: Proxy path -> v -> f x -> f' x
 
@@ -145,22 +136,9 @@ instance SetIncomplete path v b b' => SetIncomplete (RR ': path) v (a :*: b) (a 
 instance SetIncomplete '[] v (Rec0 (Incomplete v)) (Rec0 v) where
   setIncomplete Proxy v (K1 Incomplete) = K1 v
 
-a :: IncompleteRep (Rep Example) x
-a = emptyIncompletRep
-
-b = setIncomplete (Proxy @(FromJust Tru)) (10 :: Int) a
-
-c = setIncomplete (Proxy @(FromJust Tru2)) "hello" b
-
-
-finish :: Generic a => Rep a x -> a
-finish = to
-
-val' :: Example
-val' = (emptyIncompletRep :: IncompleteRep (Rep Example) x)
-        & fillAField2 (Proxy @"field1") (10 :: Int)
-        & fillAField2 (Proxy @"field2") "Salut"
-        & finish
-
 fillAField2 :: forall (fieldName :: Symbol) v f f' x path. (path ~ FromJust (PathToField fieldName f), SetIncomplete path v f f') => Proxy fieldName -> v -> f x -> f' x
 fillAField2 Proxy = setIncomplete (Proxy @path)
+
+-- | Finish an incomplete type, only if all required fields are specified.
+finish :: Generic a => Rep a x -> a
+finish = to
