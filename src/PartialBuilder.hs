@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
@@ -78,17 +79,19 @@ module PartialBuilder
 where
 
 import Data.Data (Proxy (Proxy))
+import Data.Function ((&))
 import GHC.Generics
 import GHC.TypeLits (Symbol)
 
 -- | That's a placeholder for a future value, which is not yet known.
 data Incomplete t = Incomplete
   deriving (Show)
+
 -- | @'IncompleteRep ('Rep t)@ represents a record where all fields @t'@ are replaced by @'Incomplete t'@
 type family IncompleteRep x where
-  IncompleteRep (C1 x v) = C1 x (IncompleteRep v)
-  IncompleteRep (a :*: b) = IncompleteRep a :*: IncompleteRep b
   IncompleteRep (S1 s (Rec0 t)) = S1 s (Rec0 (Incomplete t))
+  IncompleteRep (M1 x y v) = M1 x y (IncompleteRep v)
+  IncompleteRep (a :*: b) = IncompleteRep a :*: IncompleteRep b
 
 -- | Build a 'Rep' which contains 'Incomplete' in all field values.
 class EmptyIncompleteRep f where
@@ -124,16 +127,16 @@ type family FromJust x where
 class SetIncomplete path v f f' | path v f -> f' where
   setIncomplete :: Proxy path -> v -> f x -> f' x
 
-instance SetIncomplete p v z z' => SetIncomplete p v (M1 x y z) (M1 x y z') where
+instance (M1 x y z' ~ f', SetIncomplete p v z z') => SetIncomplete p v (M1 x y z) f' where
   setIncomplete path v (M1 x) = M1 (setIncomplete path v x)
 
-instance SetIncomplete path v a a' => SetIncomplete (LL ': path) v (a :*: b) (a' :*: b) where
+instance (a' :*: b ~ f', SetIncomplete path v a a') => SetIncomplete (LL ': path) v (a :*: b) f' where
   setIncomplete Proxy v (a :*: b) = setIncomplete (Proxy @path) v a :*: b
 
-instance SetIncomplete path v b b' => SetIncomplete (RR ': path) v (a :*: b) (a :*: b') where
+instance (a :*: b' ~ f', SetIncomplete path v b b') => SetIncomplete (RR ': path) v (a :*: b) f' where
   setIncomplete Proxy v (a :*: b) = a :*: setIncomplete (Proxy @path) v b
 
-instance SetIncomplete '[] v (Rec0 (Incomplete v)) (Rec0 v) where
+instance (Rec0 v ~ f') => SetIncomplete '[] v (Rec0 (Incomplete v)) f' where
   setIncomplete Proxy v (K1 Incomplete) = K1 v
 
 fillAField2 :: forall (fieldName :: Symbol) v f f' x path. (path ~ FromJust (PathToField fieldName f), SetIncomplete path v f f') => Proxy fieldName -> v -> f x -> f' x
@@ -142,3 +145,16 @@ fillAField2 Proxy = setIncomplete (Proxy @path)
 -- | Finish an incomplete type, only if all required fields are specified.
 finish :: Generic a => Rep a x -> a
 finish = to
+
+data Example = Example
+  { field1 :: Int,
+    field2 :: String
+  }
+  deriving (Generic, Show)
+
+defExample :: Example
+defExample =
+  (emptyIncompletRep :: IncompleteRep (Rep Example) x)
+    & fillAField2 (Proxy @"field1") (10 :: Int)
+    & fillAField2 (Proxy @"field2") "Salut"
+    & finish
